@@ -1,0 +1,16 @@
+{
+  "name": "products",
+  "version": "1.0.0",
+  "description": "Products microservice",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "prisma": "npx prisma"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.16.3",
+    "express": "^4.18.2",
+    "prisma": "^6.16.3"
+  }
+}

@@ -1,0 +1,38 @@
+LOAD TEST 
+
+k6 run load-test.js
+
+docker-compose run --rm k6 run --out influxdb=http://influxdb:8086/k6-payments /scripts/payment-load-test.js
+
+
+Configurar o Grafana
+
+Acesse o Grafana → http://localhost:3000
+
+Faça login (admin / admin)
+
+Vá em Connections → Data Sources → Add data source
+
+Escolha InfluxDB
+
+Configure assim:
+
+URL: http://influxdb:8086
+
+Database: k6-payments
+
+Auth: desabilitado
+
+Clique em Save & Test
+
+Deve aparecer: "Data source is working"
+
+Importar o Dashboard oficial do k6
+
+No menu lateral esquerdo → Dashboards → Import
+
+Carregue o template do dashboard
+
+Selecione sua fonte de dados
+
+Clique em Import
