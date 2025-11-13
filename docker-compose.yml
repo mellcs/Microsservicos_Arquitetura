@@ -56,7 +56,6 @@ services:
       - "27018:27017"
 
   # microsserviços
-
   # > products
   products:
     build: ./products
@@ -143,6 +142,17 @@ services:
     networks: [ app-net ]
     command: >
       sh -c "sleep 5 && npx prisma db push && npm run start"
+  
+  # extras  
+  # > rabbitmq
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    restart: always
+    ports:
+      - "5672:5672"     # porta para apps
+      - "15672:15672"   # painel de administração
+    networks: [ app-net ]
 
   # > grafanas e afins
   #influxdb:
@@ -191,15 +201,14 @@ services:
 # > volumes
 
 volumes:
-  products_pgdata: {}   # <--- CORREÇÃO: Faltava definir
-  users_pgdata: {}      # <--- CORREÇÃO: Faltava definir
-  payments_pgdata: {}   # <--- CORREÇÃO: Nome estava 'payments_postgres_data'
-  mongo_orders_data: {} # <--- CORREÇÃO: Nome estava 'orders_mongo_data'
+  products_pgdata: {}   
+  users_pgdata: {}      
+  payments_pgdata: {}   
+  mongo_orders_data: {} 
   #influxdb_data: {}
   #grafana_data: {}
-  # (O volume 'pgadmin_data' foi removido pois não era usado)
 
 # > redes
 networks:
-  app-net:              # <--- CORREÇÃO: Definição da rede que faltava
+  app-net:              
     driver: bridge
