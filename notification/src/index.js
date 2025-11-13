@@ -2,11 +2,37 @@ import express from "express";
 import nodemailer from "nodemailer";
 import dotenv from "dotenv";
 import { PrismaClient } from "@prisma/client";
+import amqp from "amqplib";
 
 dotenv.config();
 const app = express();
 app.use(express.json());
 const prisma = new PrismaClient();
+
+let channel;
+
+// conexão com RabbitMQ
+async function connectRabbitMQ() {
+  try {
+    const connection = await amqp.connect("amqp://rabbitmq:5672");
+    channel = await connection.createChannel();
+    await channel.assertQueue("payment_notifications");
+    console.log("Connected to RabbitMQ (consumer)!");
+
+    // consumidor da fila
+    channel.consume("payment_notifications", async (msg) => {
+      if (msg !== null) {
+        const content = JSON.parse(msg.content.toString());
+        console.log(`${content.nomeCliente}, seu pedido ${content.orderId} foi PAGO com sucesso e será despachado em breve.`);
+        channel.ack(msg);
+      }
+    });
+
+  } catch (err) {
+    console.error("Error connecting to RabbitMQ:", err.message);
+  }
+}
+connectRabbitMQ();
 
 // config do transporter
 const transporter = nodemailer.createTransport({
