@@ -2,6 +2,20 @@ import express from "express";
 import axios from "axios";
 import { PrismaClient } from "@prisma/client";
 import dotenv from "dotenv";
+import amqp from "amqplib";
+
+let channel;
+async function connectRabbitMQ() {
+  try {
+    const connection = await amqp.connect("amqp://rabbitmq:5672");
+    channel = await connection.createChannel();
+    await channel.assertQueue("payment_notifications");
+    console.log("Connected to RabbitMQ (producer)!");
+  } catch (err) {
+    console.error("Error connecting to RabbitMQ:", err.message);
+  }
+}
+connectRabbitMQ();
 
 dotenv.config();
 const app = express();
@@ -69,13 +83,22 @@ app.post("/payments/:id/process", async (req, res) => {
     if (approved) {
       await axios.patch(`${process.env.ORDERS_SERVICE_URL}/orders/${payment.orderId}/confirm`);
 
-      // notifica pedido aprovado
-      await axios.post(`${process.env.NOTIFICATION_SERVICE_URL}/notify`, {
-        type: "PAYMENT",
-        recipient: "financeiro@teste.com",
-        subject: "Pagamento aprovado!",
-        message: `O pagamento do pedido ${payment.orderId} foi aprovado e confirmado com sucesso.`,
-      });
+      const orderRes = await axios.get(`${process.env.ORDERS_SERVICE_URL}/orders/${payment.orderId}`);
+      const order = orderRes.data;
+
+      // envia evento ao RabbitMQ
+      const message = {
+        nomeCliente: order.userName || "Cliente",
+        orderId: payment.orderId,
+      };
+
+      if (channel) {
+        channel.sendToQueue("payment_notifications", Buffer.from(JSON.stringify(message)));
+        console.log("Mensagem enviada para RabbitMQ:", message);
+      } else {
+        console.warn("Canal RabbitMQ não disponível!");
+      }
+
     } else {
       await axios.patch(`${process.env.ORDERS_SERVICE_URL}/orders/${payment.orderId}/cancel`);
 
