@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import axios from "axios";
 import dotenv from "dotenv";
 import { Order } from "../models/Order.js";
+import { Kafka } from "kafkajs";
 
 dotenv.config();
 
@@ -17,7 +18,26 @@ axios.interceptors.response.use(
 const app = express();
 app.use(express.json());
 
-// conecta com o mongo
+// ===== KAFKA PRODUCER =====
+const kafka = new Kafka({
+  clientId: "orders-service",
+  brokers: ["kafka:9092"],
+});
+
+const producer = kafka.producer();
+
+async function connectKafka() {
+  try {
+    await producer.connect();
+    console.log("Orders conectado ao Kafka (producer)");
+  } catch (err) {
+    console.error("Erro ao conectar ao Kafka:", err.message);
+  }
+}
+
+connectKafka();
+
+// ===== MONGO =====
 mongoose
   .connect(process.env.MONGO_URI)
   .then(() => console.log("Connected to MongoDB (orders_db)"))
@@ -29,13 +49,15 @@ app.get("/", (req, res) => res.json({ message: "Orders service running" }));
 // endpoint de criar pedido
 app.post("/orders", async (req, res) => {
   try {
-    const { productId, quantity } = req.body;
+    const { userId, productId, quantity } = req.body;
 
-    if (!productId || !quantity || quantity <= 0)
+    if (!userId || !productId || !quantity || quantity <= 0)
       return res.status(400).json({ error: "Campos inválidos" });
 
     // procura produto
-    const productRes = await axios.get(`${process.env.PRODUCTS_SERVICE_URL}/products/${productId}`);
+    const productRes = await axios.get(
+      `${process.env.PRODUCTS_SERVICE_URL}/products/${productId}`
+    );
     const product = productRes.data;
     if (!product) return res.status(404).json({ error: "Produto não encontrado" });
 
@@ -43,28 +65,38 @@ app.post("/orders", async (req, res) => {
     if (product.stock < quantity)
       return res.status(400).json({ error: "Estoque insuficiente" });
 
-    // calcula o total
+    // calcula total
     const totalPrice = product.price * quantity;
 
-    // cria o pedido
+    // cria pedido
     const order = await Order.create({
+      userId,
       productId,
       quantity,
       totalPrice,
       status: "PENDING",
     });
 
-    // atualiza o estoque
-    await axios.patch(`${process.env.PRODUCTS_SERVICE_URL}/products/${productId}/stock`, {
-      amount: -quantity,
-    });
+    // atualiza estoque
+    await axios.patch(
+      `${process.env.PRODUCTS_SERVICE_URL}/products/${productId}/stock`,
+      { amount: -quantity }
+    );
 
-    // notifica que o pedido foi criado
-    await axios.post(`${process.env.NOTIFICATION_SERVICE_URL}/notify`, {
-      type: "ORDER",
-      recipient: "cliente@teste.com",
-      subject: "Pedido criado!",
-      message: `O pedido ${order.id} foi criado com sucesso. Valor total: R$ ${totalPrice.toFixed(2)}.`,
+    // ========= PUBLICA EVENTO NO KAFKA =========
+    await producer.send({
+      topic: "orders-topic",
+      messages: [
+        {
+          value: JSON.stringify({
+            orderId: order.id,
+            userId,
+            productId,
+            quantity,
+            totalPrice,
+          }),
+        },
+      ],
     });
 
     res.status(201).json(order);
@@ -74,20 +106,36 @@ app.post("/orders", async (req, res) => {
   }
 });
 
-// endpoint de listar pedidos
+// listar pedidos
 app.get("/orders", async (req, res) => {
   const orders = await Order.find().sort({ createdAt: -1 });
   res.json(orders);
 });
 
-// endpoint de buscar pedido por id
+// buscar por usuário
+app.get("/orders/user/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const orders = await Order.find({ userId });
+
+    if (orders.length === 0)
+      return res.status(404).json({ message: "Nenhum pedido encontrado para este usuário." });
+
+    res.json(orders);
+  } catch (error) {
+    console.error("Erro ao buscar pedidos do usuário:", error.message);
+    res.status(500).json({ error: "Erro ao buscar pedidos do usuário" });
+  }
+});
+
+// buscar por id de pedido
 app.get("/orders/:id", async (req, res) => {
   const order = await Order.findById(req.params.id);
   if (!order) return res.status(404).json({ error: "Pedido não encontrado" });
   res.json(order);
 });
 
-// endpoint de confirmar pedido
+// confirmar pedido
 app.patch("/orders/:id/confirm", async (req, res) => {
   const order = await Order.findById(req.params.id);
   if (!order) return res.status(404).json({ error: "Pedido não encontrado" });
@@ -97,18 +145,17 @@ app.patch("/orders/:id/confirm", async (req, res) => {
   order.status = "APPROVED";
   await order.save();
 
-  // notificação de pedido confirmado
   await axios.post(`${process.env.NOTIFICATION_SERVICE_URL}/notify`, {
     type: "ORDER",
-    recipient: "cliente@teste.com",
+    recipient: order.userId,
     subject: "Pedido confirmado!",
-    message: `Seu pedido ${order.id} foi confirmado e está em preparação.`,
+    message: `O pedido ${order.id} (usuário: ${order.userId}) foi confirmado e está em preparação.`,
   });
 
   res.json(order);
 });
 
-// endpoint de cancelar pedido
+// cancelar pedido
 app.patch("/orders/:id/cancel", async (req, res) => {
   const order = await Order.findById(req.params.id);
   if (!order) return res.status(404).json({ error: "Pedido não encontrado" });
@@ -116,22 +163,22 @@ app.patch("/orders/:id/cancel", async (req, res) => {
   if (order.status === "CANCELLED")
     return res.status(400).json({ error: "Pedido já cancelado" });
 
-  // coloca o produto de volta no estoque
+  // devolve estoque se estava pendente
   if (order.status === "PENDING") {
-    await axios.patch(`${process.env.PRODUCTS_SERVICE_URL}/products/${order.productId}/stock`, {
-      amount: order.quantity,
-    });
+    await axios.patch(
+      `${process.env.PRODUCTS_SERVICE_URL}/products/${order.productId}/stock`,
+      { amount: order.quantity }
+    );
   }
 
   order.status = "CANCELLED";
   await order.save();
 
-  // notificação de cancelamento
   await axios.post(`${process.env.NOTIFICATION_SERVICE_URL}/notify`, {
     type: "ORDER",
-    recipient: "cliente@teste.com",
+    recipient: order.userId,
     subject: "Pedido cancelado!",
-    message: `Seu pedido ${order.id} foi cancelado.`,
+    message: `O pedido ${order.id} (usuário: ${order.userId}) foi cancelado.`,
   });
 
   res.json(order);
