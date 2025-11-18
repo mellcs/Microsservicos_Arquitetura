@@ -1,7 +1,6 @@
-version: '3.8' 
+version: '3.8'
 
 services:
-  # databases
   postgres-products:
     image: postgres:15
     container_name: postgres_products
@@ -44,7 +43,6 @@ services:
     ports:
       - "5434:5432"
 
-  # > mongo db
   mongo-orders:
     image: mongo:7
     container_name: mongo_orders
@@ -55,8 +53,6 @@ services:
     ports:
       - "27018:27017"
 
-  # microsserviços
-  # > products
   products:
     build: ./products
     container_name: ms_products
@@ -71,7 +67,6 @@ services:
     command: >
       sh -c "sleep 10 && npx prisma db push && npm run start"
 
-  # > users
   users:
     build: ./users
     container_name: ms_users
@@ -88,43 +83,38 @@ services:
     command: >
       sh -c "sleep 10 && npx prisma db push && npm run start"
 
-  # > orders
   orders:
     build: ./orders
     container_name: ms_orders
     depends_on:
       - mongo-orders
       - products
-      - notification
     environment:
       MONGO_URI: mongodb://mongo-orders:27017/orders_db
       PORT: 3000
       PRODUCTS_SERVICE_URL: http://products:3000
-      NOTIFICATION_SERVICE_URL: http://notification:3000
+      KAFKA_BROKER: kafka:9092
     ports:
       - "3004:3000"
     networks: [ app-net ]
 
-  # > payments
   payments:
     build: ./payments
     container_name: ms_payments
     depends_on:
       - postgres-payments
       - orders
-      - notification
     environment:
       DATABASE_URL: postgresql://payments_user:paym_s3cret_!B7@postgres-payments:5432/payments_db
       PORT: 3000
       ORDERS_SERVICE_URL: http://orders:3000
-      NOTIFICATION_SERVICE_URL: http://notification:3000
+      KAFKA_BROKER: kafka:9092
     ports:
       - "3003:3000"
     networks: [ app-net ]
     command: >
       sh -c "sleep 10 && npx prisma db push && npm run start"
 
-  # > notification
   notification:
     build: ./notification
     container_name: ms_notification
@@ -142,73 +132,48 @@ services:
     networks: [ app-net ]
     command: >
       sh -c "sleep 5 && npx prisma db push && npm run start"
-  
-  # extras  
-  # > rabbitmq
+
   rabbitmq:
     image: rabbitmq:3-management
     container_name: rabbitmq
     restart: always
     ports:
-      - "5672:5672"     # porta para apps
-      - "15672:15672"   # painel de administração
+      - "5672:5672"
+      - "15672:15672"
     networks: [ app-net ]
 
-  # > grafanas e afins
-  #influxdb:
-   # image: influxdb:1.8
-   # container_name: influxdb
-   # restart: always
-   # ports:
-   #   - "8086:8086"
-   # environment:
-    #  - INFLUXDB_DB=k6
-   #   - INFLUXDB_HTTP_AUTH_ENABLED=false
-    #volumes:
-    #  - influxdb_data:/var/lib/influxdb
-    #  - ./influxdb-init/init-influxdb.sh:/docker-entrypoint-initdb.d/init-influxdb.sh
-    #networks: [ app-net ] # <--- CORREÇÃO: Adicionado à rede principal
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.3.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks: [ app-net ]
 
-  #grafana:
-    #image: grafana/grafana:10.2.3
-    #container_name: grafana
-    #restart: always
-    #ports:
-     # - "3000:3000"
-    #environment:
-    #  - GF_SECURITY_ADMIN_USER=admin
-    #  - GF_SECURITY_ADMIN_PASSWORD=admin
-    #depends_on:
-    #  - influxdb
-    #volumes:
-    #  - grafana_data:/var/lib/grafana
-    #networks: [ app-net ] # <--- CORREÇÃO: Adicionado à rede principal
-
-  # === K6 ===
-  #k6:
-    #image: grafana/k6:latest
-    #container_name: k6_runner
-    #depends_on:
-     # - payments      # <--- CORREÇÃO: Nome do serviço estava errado
-      #- orders        # <--- CORREÇÃO: Nome do serviço estava errado
-      #- influxdb
-    #volumes:
-      #- ./k6-scripts:/scripts
-    #entrypoint: ["k6"]
-    #networks:
-      #- app-net     # <--- CORREÇÃO: Deve estar na rede dos serviços que testa
-
-# > volumes
+  kafka:
+    image: confluentinc/cp-kafka:7.3.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks: [ app-net ]
 
 volumes:
   products_pgdata: {}   
   users_pgdata: {}      
   payments_pgdata: {}   
   mongo_orders_data: {} 
-  #influxdb_data: {}
-  #grafana_data: {}
 
-# > redes
 networks:
-  app-net:              
+  app-net:
     driver: bridge
