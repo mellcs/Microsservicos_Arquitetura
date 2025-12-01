@@ -1,120 +1,155 @@
 import express from "express";
+import { PrismaClient, PaymentStatus } from "@prisma/client";
+import amqp from "amqplib";
+import { Kafka } from "kafkajs";
 import axios from "axios";
-import { PrismaClient } from "@prisma/client";
-import dotenv from "dotenv";
+import cache from "../cache.js";
 
-dotenv.config();
 const app = express();
 app.use(express.json());
+
 const prisma = new PrismaClient();
+const PORT = process.env.PORT || 3000;
 
-// health check
-app.get("/", (req, res) => res.json({ message: "Payments service running" }));
+// rabbitmq
+let channel;
 
-// endpoint pagamento pendente
-app.post("/payments", async (req, res) => {
+async function initRabbitMQ() {
   try {
-    const { orderId, method } = req.body;
-    if (!orderId || !method)
-      return res.status(400).json({ error: "Campos inválidos" });
+    const connection = await amqp.connect("amqp://rabbitmq");
 
-    // pega pedido no orders
-    const orderRes = await axios.get(`${process.env.ORDERS_SERVICE_URL}/orders/${orderId}`);
-    const order = orderRes.data;
+    connection.on("close", () => {
+      console.error("[RABBITMQ] conexão fechada — tentando reconectar...");
+      setTimeout(initRabbitMQ, 3000);
+    });
 
-    if (!order) return res.status(404).json({ error: "Pedido não encontrado" });
-    if (order.status !== "PENDING")
-      return res.status(400).json({ error: "Pedido já processado" });
+    channel = await connection.createChannel();
+    await channel.assertQueue("notifications", { durable: true });
 
-    // cria o pagamento pendente
-    const payment = await prisma.payment.create({
-      data: {
-        orderId,
-        amount: order.totalPrice,
-        method,
-        status: "PENDING",
+    console.log("[RABBITMQ] Conectado e fila pronta");
+  } catch (err) {
+    console.error("[RABBITMQ] Erro ao conectar — tentando novamente...");
+    setTimeout(initRabbitMQ, 3000);
+  }
+}
+
+// kafka
+const kafka = new Kafka({
+  clientId: "payment-service",
+  brokers: ["kafka:9092"],
+  retry: { retries: 10 },
+});
+
+const consumer = kafka.consumer({
+  groupId: "payment-service-group",
+});
+
+async function initKafkaConsumer() {
+  try {
+    await consumer.connect();
+    await consumer.subscribe({ topic: "orders-topic", fromBeginning: false });
+
+    console.log("[KAFKA] Conectado ao tópico orders-topic");
+
+    await consumer.run({
+      eachMessage: async ({ message }) => {
+        try {
+          const payload = JSON.parse(message.value.toString());
+          console.log("[KAFKA] Mensagem recebida:", payload);
+
+          const orderId = String(payload.orderId);
+          if (!orderId) return;
+
+          let userName = "Cliente";
+          try {
+            const userResponse = await axios.get(
+              `http://users:3000/users/${payload.userId}`
+            );
+            userName = userResponse.data.name;
+          } catch (err) {
+            console.error("[PAYMENTS] Falha ao buscar usuário:", err.message);
+          }
+
+          const saved = await prisma.payment.create({
+            data: {
+              orderId,
+              amount: Number(payload.totalPrice),
+              method: "AUTO",
+              status: PaymentStatus.PENDING,
+            },
+          });
+
+          console.log(`[KAFKA] Pagamento criado (PENDING) orderId=${orderId}`);
+
+          // envia evento pro rabbitmq
+          if (channel) {
+            channel.sendToQueue(
+              "notifications",
+              Buffer.from(
+                JSON.stringify({
+                  orderId,
+                  nomeCliente: userName, 
+                })
+              ),
+              { persistent: true }
+            );
+
+            console.log(
+              `[RABBITMQ] Evento enviado para notifications: { orderId: ${orderId}, nomeCliente: ${userName} }`
+            );
+          }
+        } catch (err) {
+          console.error("[KAFKA] Erro processando mensagem:", err.message);
+        }
       },
     });
-
-    res.status(201).json(payment);
   } catch (err) {
-    console.error("Error creating payment:", err.message);
-    if (err.response?.status === 404)
-      return res.status(404).json({ error: "Pedido não encontrado" });
-    res.status(500).json({ error: "Erro ao criar pagamento" });
+    console.error("[KAFKA] Falha ao iniciar consumer:", err.message);
   }
+}
+
+// rotas
+app.get("/", (req, res) => {
+  res.json({ message: "Payments service running <3" });
 });
 
-// endpoint de simulação de processamento de pagamento
-app.post("/payments/:id/process", async (req, res) => {
-  try {
-    const id = parseInt(req.params.id);
-    const payment = await prisma.payment.findUnique({ where: { id } });
-
-    if (!payment) return res.status(404).json({ error: "Pagamento não encontrado" });
-    if (payment.status !== "PENDING")
-      return res.status(400).json({ error: "Pagamento já processado" });
-
-    // simula o resultado
-    const approved = Math.random() < 0.7;
-    const newStatus = approved ? "APPROVED" : "DECLINED";
-
-    // atualiza pagamento
-    const updatedPayment = await prisma.payment.update({
-      where: { id },
-      data: { status: newStatus },
-    });
-
-    // atualiza pedido 
-    if (approved) {
-      await axios.patch(`${process.env.ORDERS_SERVICE_URL}/orders/${payment.orderId}/confirm`);
-
-      // notifica pedido aprovado
-      await axios.post(`${process.env.NOTIFICATION_SERVICE_URL}/notify`, {
-        type: "PAYMENT",
-        recipient: "financeiro@teste.com",
-        subject: "Pagamento aprovado!",
-        message: `O pagamento do pedido ${payment.orderId} foi aprovado e confirmado com sucesso.`,
-      });
-    } else {
-      await axios.patch(`${process.env.ORDERS_SERVICE_URL}/orders/${payment.orderId}/cancel`);
-
-      // notifica pedido cancelado
-      await axios.post(`${process.env.NOTIFICATION_SERVICE_URL}/notify`, {
-        type: "PAYMENT",
-        recipient: "financeiro@teste.com",
-        subject: "Pagamento recusado!",
-        message: `O pagamento do pedido ${payment.orderId} foi recusado. O pedido foi cancelado.`,
-      });
-    }
-
-    res.json({
-      message: approved
-        ? "Pagamento aprovado e pedido confirmado!"
-        : "Pagamento recusado, pedido cancelado!",
-      payment: updatedPayment,
-    });
-  } catch (err) {
-    console.error("Error processing payment:", err.message);
-    res.status(500).json({ error: "Erro ao processar pagamento" });
-  }
+app.post("/", (req, res) => {
+  res.status(200).send("OK");
 });
 
-// endpoint de listar pagamentos
 app.get("/payments", async (req, res) => {
-  const payments = await prisma.payment.findMany({ orderBy: { id: "desc" } });
-  res.json(payments);
+  try {
+    const payments = await prisma.payment.findMany({
+      orderBy: { id: "desc" },
+    });
+    res.json(payments);
+  } catch {
+    res.status(500).json({ error: "Erro ao buscar pagamentos" });
+  }
 });
 
-// endpoint de buscar pagamentos por id
+// get types com cache infinito
+app.get("/payments/types", cache(315360000), (req, res) => {
+  res.json(["CREDIT_CARD", "PIX", "BOLETO"]);
+});
+
 app.get("/payments/:id", async (req, res) => {
-  const payment = await prisma.payment.findUnique({
-    where: { id: parseInt(req.params.id) },
-  });
-  if (!payment) return res.status(404).json({ error: "Pagamento não encontrado" });
-  res.json(payment);
+  try {
+    const payment = await prisma.payment.findUnique({
+      where: { id: Number(req.params.id) },
+    });
+
+    if (!payment)
+      return res.status(404).json({ error: "Pagamento não encontrado" });
+
+    res.json(payment);
+  } catch {
+    res.status(500).json({ error: "Erro ao buscar pagamento" });
+  }
 });
 
-app.listen(process.env.PORT || 3000, () =>
-  console.log(`Payments service running on port ${process.env.PORT || 3000}`)
-);
+app.listen(PORT, async () => {
+  console.log(`Payment-service rodando na porta ${PORT}`);
+  await initRabbitMQ();
+  await initKafkaConsumer();
+});

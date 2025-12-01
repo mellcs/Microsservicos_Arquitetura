@@ -1,0 +1,53 @@
+_format_version: "2.1"
+_transform: true
+
+plugins:
+- name: rate-limiting
+  config:
+    minute: 10
+    policy: local
+  enabled: true
+  protocols: ["http", "https"]
+
+- name: request-size-limiting
+  config:
+    allowed_payload_size: 200
+    size_unit: kilobytes
+  enabled: true
+  protocols: ["http", "https"]
+
+services:
+- name: users-service
+  url: http://users:3000
+  routes:
+  - name: users-route
+    paths: ["/users"]
+    strip_path: false
+
+- name: products-service
+  url: http://products:3000
+  routes:
+  - name: products-route
+    paths: ["/products"]
+    strip_path: false
+
+- name: orders-service
+  url: http://orders:3000
+  routes:
+  - name: orders-route
+    paths: ["/orders"]
+    strip_path: false
+
+- name: payments-service
+  url: http://payments:3000
+  routes:
+  - name: payments-route
+    paths: ["/payments"]
+    strip_path: false
+
+- name: notification-service
+  url: http://notification:3000
+  routes:
+  - name: notification-route
+    paths: ["/notification"]
+    strip_path: false
