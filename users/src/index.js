@@ -52,7 +52,6 @@ app.get("/users", async (req, res) => {
       select: { id: true, name: true, email: true, createdAt: true },
       orderBy: { createdAt: "desc" },
     });
-
     res.json(users);
   } catch (err) {
     console.error("Erro ao listar usuários:", err.message);
@@ -70,6 +69,7 @@ app.get("/users/:id", cache(86400), async (req, res) => {
 
     if (!user) return res.status(404).json({ error: "Usuário não encontrado" });
 
+    if (!user) return res.status(404).json({ error: "Usuário não encontrado" });
     res.json(user);
   } catch (err) {
     console.error("Erro ao buscar usuário:", err.message);
